@@ -21,14 +21,6 @@ class Stage1():
         x = LeakyReLU(alpha=0.2)(x)
         return x
 
-    def samplec(mulogsigma):
-        mu = mulogsigma[:, :128]
-        logsigma = mulogsigma[:, 128:]
-        stddev = K.exp(logsigma)
-        epsilon = K.random_normal(shape=K.constant((mu.shape[1],), dtype='int32'))
-        cond = stddev * epsilon + mu
-        return cond
-
     def build_ca(self):
         embed = Input(shape=(1024,))
         x = Dense(256)(embed)
@@ -43,9 +35,16 @@ class Stage1():
         compembed = Model(inputs=[embed], outputs=[x])
         return compembed
 
-    def build_gen(self, ca):
-        embed = Input(shape=(1024,))
-        mulogsigma = ca(embed)
+    def samplec(mulogsigma):
+        mu = mulogsigma[:, :128]
+        logsigma = mulogsigma[:, 128:]
+        stddev = K.exp(logsigma)
+        epsilon = K.random_normal(shape=K.constant((mu.shape[1],), dtype='int32'))
+        cond = stddev * epsilon + mu
+        return cond
+
+    def build_gen(self):
+        mulogsigma = Input(shape=(256,))
         cond = Lambda(samplec)(mulogsigma)
         noise = Input(shape=(100,))
         x = Concatenate(axis=1)([cond, noise])
@@ -63,7 +62,7 @@ class Stage1():
         x = self.conv3(x, 3)
         x = Activation(activation='tanh')(x)
 
-        gen = Model(inputs=[embed, noise], outputs=[x])
+        gen = Model(inputs=[mulogsigma, noise], outputs=[x])
         return gen
 
     def build_dis(self):
@@ -88,16 +87,16 @@ class Stage1():
         return dis
 
     def build_gan(self, gen, dis):
-        embed = Input(shape=(1024,))
+        mulogsigma = Input(shape=(256,))
         noise = Input(shape=(100,))
         compembed = Input(shape=(4, 4, 128))
 
-        image = gen([embed, noise])
+        image = gen([mulogsigma, noise])
 
         dis.trainable = False
         score = dis([image, compembed])
 
-        gan = Model(inputs=[embed, noise, compembed], outputs=[score])
+        gan = Model(inputs=[mulogsigma, noise, compembed], outputs=[score])
         return gan
 
     def train(self):
@@ -136,21 +135,21 @@ class Stage1():
                                                        embeddings_file_path=embeddings_file_path_test,
                                                        self.image_size=(64, 64))
 
-#===================================================================================================================
+#ALEX FOR ABOVE===================================================================================================================
 
         self.ca = self.build_ca()
         self.ca.compile(loss="binary_crossentropy", optimizer="adam")
+
+        self.compembed = self.build_compembed()
+        self.compembed.compile(loss="binary_crossentropy", optimizer="adam")
 
         self.dis = self.build_dis()
         dis_optimizer = Adam(lr=self.dis_lr, beta_1=0.5, beta_2=0.999)
         self.dis.compile(loss='binary_crossentropy', optimizer=dis_optimizer)
 
-        self.gen = self.build_gen(self.ca)
+        self.gen = self.build_gen()
         gen_optimizer = Adam(lr=self.gen_lr, beta_1=0.5, beta_2=0.999)
         self.gen.compile(loss="mse", optimizer=gen_optimizer)
-
-        self.compembed = self.build_compembed()
-        self.compembed.compile(loss="binary_crossentropy", optimizer="adam")
 
         def KL_loss(y_true, y_pred):
             mu = y_pred[:, :128]
@@ -158,9 +157,6 @@ class Stage1():
             loss = -logsigma + .5 * (-1 + K.exp(2. * logsigma) + K.square(mu))
             loss = K.mean(loss)
             return loss
-
-        def custom_generator_loss(y_true, y_pred):
-            return K.binary_crossentropy(y_true, y_pred)
 
         self.gan = self.build_gan(self.gen, self.dis)
         self.gan.compile(loss=['binary_crossentropy', KL_loss], loss_weights=[1, 2.0],
@@ -197,7 +193,8 @@ class Stage1():
                 embed_batch = embed_train[index * self.batch_size:(index + 1) * self.batch_size]
 
                 # Generate fake images
-                fake_images = self.gen.predict([embed_batch, noise_batch], verbose=3)
+                mulogsigma_batch = self.ca.predict_on_batch(embed_batch)
+                fake_images = self.gen.predict_on_batch([mulogsigma_batch, noise_batch], verbose=3)
 
                 # Generate compressed embeddings
                 compembed_batch = self.compembed.predict_on_batch(embed_batch)
@@ -216,7 +213,7 @@ class Stage1():
                 print("d_loss_wrong:{}".format(dis_loss_wrong))
                 print("dis_loss:{}".format(dis_loss))
 
-                gen_loss = self.gan.train_on_batch([embed_batch, noise_batch, compembed_batch],[K.ones((self.batch_size, 1)) * 0.9, K.ones((self.batch_size, 256)) * 0.9])
+                gen_loss = self.gan.train_on_batch([mulogsigma_batch, noise_batch, compembed_batch],[K.ones((self.batch_size, 1)) * 0.9, K.ones((self.batch_size, 256)) * 0.9])
                 print("gen_loss:{}".format(gen_loss))
 
                 dis_losses.append(dis_loss)
@@ -228,9 +225,9 @@ class Stage1():
             # Generate and save images after every 2nd epoch
             if epoch % 2 == 0:
                 # z_noise2 = np.random.uniform(-1, 1, size=(self.batch_size, self.noise_dim))
-                noise2 = np.random.normal(0, 1, size=(self.batch_size, self.noise_dim))
+                noise_batch = np.random.normal(0, 1, size=(self.batch_size, self.noise_dim))
                 embed_batch = embed_test[0:self.batch_size]
-                fake_images = self.gen.predict_on_batch([embed_batch, noise2])
+                fake_images = self.gen.predict_on_batch([embed_batch, noise_batch])
 
                 # Save images
                 for i, img in enumerate(fake_images[:10]):
