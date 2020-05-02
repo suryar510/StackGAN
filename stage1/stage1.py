@@ -246,7 +246,7 @@ class Stage1():
         plt.savefig(path)
         plt.close()
 
-    def write_log(callback, name, loss, batch_no):
+    def write_log(self, callback, name, loss, batch_no):
         summary = tf.Summary()
         summary_value = summary.value.add()
         summary_value.simple_value = loss
